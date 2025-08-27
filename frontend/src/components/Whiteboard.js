@@ -16,73 +16,20 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     const [brushSize, setBrushSize] = useState(5);
     const [isDrawing, setIsDrawing] = useState(false);
 
-    // Initialize Fabric.js canvas
+    // Initialize Fabric.js canvas (only once)
     const initCanvas = useCallback(() => {
         const canvas = new fabric.Canvas(canvasRef.current, {
-            width: window.innerWidth - 300, // Account for toolbar
+            width: window.innerWidth - 300,
             height: window.innerHeight - 100,
             backgroundColor: 'white',
             isDrawingMode: true,
         });
 
         canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-        canvas.freeDrawingBrush.width = brushSize;
-        canvas.freeDrawingBrush.color = currentColor;
-
         fabricRef.current = canvas;
 
-        // Handle object creation
-        canvas.on('path:created', (e) => {
-            if (!isDrawing) return;
+        // ... keep your event listeners here ...
 
-            const path = e.path;
-            const pathData = {
-                id: `path_${Date.now()}_${Math.random()}`,
-                type: 'path',
-                data: {
-                    path: path.path,
-                    stroke: path.stroke,
-                    strokeWidth: path.strokeWidth,
-                    fill: path.fill,
-                    left: path.left,
-                    top: path.top,
-                    scaleX: path.scaleX,
-                    scaleY: path.scaleY,
-                    angle: path.angle,
-                }
-            };
-
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({
-                    type: 'add_object',
-                    object: pathData
-                }));
-            }
-        });
-
-        // Handle object modifications
-        canvas.on('object:modified', (e) => {
-            const obj = e.target;
-            if (obj.id) {
-                const updates = {
-                    left: obj.left,
-                    top: obj.top,
-                    scaleX: obj.scaleX,
-                    scaleY: obj.scaleY,
-                    angle: obj.angle,
-                };
-
-                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                    wsRef.current.send(JSON.stringify({
-                        type: 'update_object',
-                        object_id: obj.id,
-                        updates: updates
-                    }));
-                }
-            }
-        });
-
-        // Handle window resize
         const handleResize = () => {
             canvas.setDimensions({
                 width: window.innerWidth - 300,
@@ -97,7 +44,7 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
             window.removeEventListener('resize', handleResize);
             canvas.dispose();
         };
-    }, [brushSize, currentColor, isDrawing]);
+    }, []);
 
     // WebSocket message handlers
     const handleWebSocketMessage = useCallback((data) => {
@@ -236,6 +183,7 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     };
 
     // Tool handlers
+    // Tool handlers
     const handleToolChange = (tool) => {
         const canvas = fabricRef.current;
         if (!canvas) return;
@@ -248,18 +196,19 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                 canvas.selection = false;
                 setIsDrawing(true);
                 break;
+
             case 'select':
                 canvas.isDrawingMode = false;
                 canvas.selection = true;
                 setIsDrawing(false);
                 break;
+
             case 'rect':
             case 'circle':
             case 'text':
-                canvas.isDrawingMode = false;
-                canvas.selection = false;
-                setIsDrawing(false);
+                addShape(tool); // ✅ use the existing addShape function
                 break;
+
             default:
                 break;
         }
@@ -298,15 +247,24 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                 });
                 break;
             case 'text':
-                shape = new fabric.Text('Double click to edit', {
+                shape = new fabric.Textbox('Type here...', {
                     id: shapeId,
                     left: 100,
                     top: 100,
                     fontSize: 20,
                     fill: currentColor,
                     fontFamily: 'Arial',
+                    editable: true,
                 });
+
+                // ✅ Allow immediate typing
+                canvas.add(shape);
+                canvas.setActiveObject(shape);
+                canvas.renderAll();
+                shape.enterEditing();
+                shape.hiddenTextarea?.focus();
                 break;
+
             default:
                 return;
         }
@@ -385,6 +343,21 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
             canvas.freeDrawingBrush.width = size;
         }
     };
+    // Update brush color
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        if (canvas && canvas.freeDrawingBrush) {
+            canvas.freeDrawingBrush.color = currentColor;
+        }
+    }, [currentColor]);
+
+    // Update brush size
+    useEffect(() => {
+        const canvas = fabricRef.current;
+        if (canvas && canvas.freeDrawingBrush) {
+            canvas.freeDrawingBrush.width = brushSize;
+        }
+    }, [brushSize]);
 
     // Initialize canvas and WebSocket
     useEffect(() => {

@@ -5,13 +5,13 @@ import uuid
 import json
 from datetime import datetime
 from typing import Dict, Any, List
-
+import logging
 from .database import get_database
 from .websocket.manager import manager
 from .models.session import Session, WhiteboardObject
 
 app = FastAPI(title="Collaborative Whiteboard API")
-
+logger = logging.getLogger("uvicorn.error")
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
