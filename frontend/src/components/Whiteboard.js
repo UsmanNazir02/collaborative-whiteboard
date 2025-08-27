@@ -1,13 +1,16 @@
-// src/components/Whiteboard.js
+// src/components/Whiteboard.js - Fixed Version
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as fabric from "fabric";
 import Toolbar from './Toolbar';
-import { connectWebSocket } from '../utils/websocket';
+import { connectWebSocket, sendMessage } from '../utils/websocket';
 
 const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     const canvasRef = useRef(null);
     const fabricRef = useRef(null);
-    const wsRef = useRef(null);
+    const wsManagerRef = useRef(null);
+    const isInitializedRef = useRef(false); // Prevent multiple initializations
+    const cleanupRef = useRef(null);
+
     const [isConnected, setIsConnected] = useState(false);
     const [activeUsers, setActiveUsers] = useState([]);
     const [userId, setUserId] = useState(initialUserId);
@@ -16,8 +19,94 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     const [brushSize, setBrushSize] = useState(5);
     const [isDrawing, setIsDrawing] = useState(false);
 
+    // Send WebSocket message helper
+    const sendWebSocketMessage = useCallback((message) => {
+        if (wsManagerRef.current) {
+            return sendMessage(wsManagerRef.current, message);
+        }
+        return false;
+    }, []);
+
+    // WebSocket message handlers
+    const handleWebSocketMessage = useCallback((data) => {
+        console.log('[Whiteboard] Received WebSocket message:', data.type);
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        switch (data.type) {
+            case 'session_state':
+                setUserId(data.user_id);
+                setActiveUsers(data.active_users || []);
+                setIsConnected(true);
+
+                // Clear canvas first, then load existing objects
+                canvas.clear();
+                canvas.backgroundColor = 'white';
+
+                // Load existing objects
+                if (data.objects && data.objects.length > 0) {
+                    console.log('[Whiteboard] Loading', data.objects.length, 'existing objects');
+                    data.objects.forEach(obj => {
+                        addObjectToCanvas(obj);
+                    });
+                }
+                canvas.renderAll();
+                break;
+
+            case 'object_added':
+                if (data.user_id !== userId) {
+                    console.log('[Whiteboard] Adding object from another user:', data.object.type);
+                    addObjectToCanvas(data.object);
+                }
+                break;
+
+            case 'object_updated':
+                if (data.user_id !== userId) {
+                    console.log('[Whiteboard] Updating object from another user:', data.object_id);
+                    updateObjectOnCanvas(data.object_id, data.updates);
+                }
+                break;
+
+            case 'object_deleted':
+                if (data.user_id !== userId) {
+                    console.log('[Whiteboard] Deleting object from another user:', data.object_id);
+                    removeObjectFromCanvas(data.object_id);
+                }
+                break;
+
+            case 'canvas_cleared':
+                if (data.user_id !== userId) {
+                    console.log('[Whiteboard] Canvas cleared by another user');
+                    canvas.clear();
+                    canvas.backgroundColor = 'white';
+                    canvas.renderAll();
+                }
+                break;
+
+            case 'user_joined':
+            case 'user_left':
+                console.log('[Whiteboard] User list updated:', data.active_users);
+                setActiveUsers(data.active_users || []);
+                break;
+
+            case 'error':
+                console.error('[Whiteboard] WebSocket error:', data.message);
+                break;
+
+            default:
+                console.log('[Whiteboard] Unknown message type:', data.type);
+                break;
+        }
+    }, [userId]);
+
     // Initialize Fabric.js canvas (only once)
     const initCanvas = useCallback(() => {
+        if (fabricRef.current || !canvasRef.current) {
+            console.log('[Whiteboard] Canvas already initialized or canvas ref not ready');
+            return null;
+        }
+
+        console.log('[Whiteboard] Initializing Fabric.js canvas');
         const canvas = new fabric.Canvas(canvasRef.current, {
             width: window.innerWidth - 300,
             height: window.innerHeight - 100,
@@ -26,9 +115,81 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         });
 
         canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
+        canvas.freeDrawingBrush.color = currentColor;
+        canvas.freeDrawingBrush.width = brushSize;
+
         fabricRef.current = canvas;
 
-        // ... keep your event listeners here ...
+        // Handle path creation (drawing)
+        canvas.on('path:created', (e) => {
+            const path = e.path;
+            const pathId = `path_${Date.now()}_${Math.random()}`;
+            path.set({ id: pathId });
+
+            const pathData = {
+                id: pathId,
+                type: 'path',
+                data: {
+                    path: path.path,
+                    stroke: path.stroke,
+                    strokeWidth: path.strokeWidth,
+                    fill: path.fill || '',
+                    left: path.left,
+                    top: path.top,
+                    scaleX: path.scaleX,
+                    scaleY: path.scaleY,
+                    angle: path.angle,
+                }
+            };
+
+            sendWebSocketMessage({
+                type: 'add_object',
+                object: pathData
+            });
+        });
+
+        // Handle object modifications (move, resize, rotate)
+        canvas.on('object:modified', (e) => {
+            const obj = e.target;
+            if (!obj.id) return;
+
+            const updates = {
+                left: obj.left,
+                top: obj.top,
+                scaleX: obj.scaleX,
+                scaleY: obj.scaleY,
+                angle: obj.angle,
+            };
+
+            // Add type-specific properties
+            if (obj.type === 'rect') {
+                updates.width = obj.width;
+                updates.height = obj.height;
+            } else if (obj.type === 'circle') {
+                updates.radius = obj.radius;
+            } else if (obj.type === 'textbox') {
+                updates.text = obj.text;
+                updates.fontSize = obj.fontSize;
+            }
+
+            sendWebSocketMessage({
+                type: 'update_object',
+                object_id: obj.id,
+                updates: updates
+            });
+        });
+
+        // Handle text editing
+        canvas.on('text:changed', (e) => {
+            const obj = e.target;
+            if (!obj.id) return;
+
+            sendWebSocketMessage({
+                type: 'update_object',
+                object_id: obj.id,
+                updates: { text: obj.text }
+            });
+        });
 
         const handleResize = () => {
             canvas.setDimensions({
@@ -41,70 +202,22 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         window.addEventListener('resize', handleResize);
 
         return () => {
+            console.log('[Whiteboard] Cleaning up canvas');
             window.removeEventListener('resize', handleResize);
             canvas.dispose();
+            fabricRef.current = null;
         };
-    }, []);
-
-    // WebSocket message handlers
-    const handleWebSocketMessage = useCallback((data) => {
-        const canvas = fabricRef.current;
-        if (!canvas) return;
-
-        switch (data.type) {
-            case 'session_state':
-                setUserId(data.user_id);
-                setActiveUsers(data.active_users || []);
-
-                // Load existing objects
-                data.objects.forEach(obj => {
-                    addObjectToCanvas(obj);
-                });
-                break;
-
-            case 'object_added':
-                if (data.user_id !== userId) {
-                    addObjectToCanvas(data.object);
-                }
-                break;
-
-            case 'object_updated':
-                if (data.user_id !== userId) {
-                    updateObjectOnCanvas(data.object_id, data.updates);
-                }
-                break;
-
-            case 'object_deleted':
-                if (data.user_id !== userId) {
-                    removeObjectFromCanvas(data.object_id);
-                }
-                break;
-
-            case 'canvas_cleared':
-                if (data.user_id !== userId) {
-                    canvas.clear();
-                    canvas.backgroundColor = 'white';
-                    canvas.renderAll();
-                }
-                break;
-
-            case 'user_joined':
-            case 'user_left':
-                setActiveUsers(data.active_users || []);
-                break;
-
-            default:
-                break;
-        }
-    }, [userId]);
+    }, [currentColor, brushSize, sendWebSocketMessage]);
 
     // Add object to canvas
     const addObjectToCanvas = (objData) => {
         const canvas = fabricRef.current;
         if (!canvas) return;
 
+        let fabricObject;
+
         if (objData.type === 'path') {
-            const path = new fabric.Path(objData.data.path, {
+            fabricObject = new fabric.Path(objData.data.path, {
                 id: objData.id,
                 stroke: objData.data.stroke,
                 strokeWidth: objData.data.strokeWidth,
@@ -115,9 +228,8 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                 scaleY: objData.data.scaleY || 1,
                 angle: objData.data.angle || 0,
             });
-            canvas.add(path);
         } else if (objData.type === 'rect') {
-            const rect = new fabric.Rect({
+            fabricObject = new fabric.Rect({
                 id: objData.id,
                 left: objData.data.left,
                 top: objData.data.top,
@@ -126,10 +238,12 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                 fill: objData.data.fill,
                 stroke: objData.data.stroke,
                 strokeWidth: objData.data.strokeWidth,
+                scaleX: objData.data.scaleX || 1,
+                scaleY: objData.data.scaleY || 1,
+                angle: objData.data.angle || 0,
             });
-            canvas.add(rect);
         } else if (objData.type === 'circle') {
-            const circle = new fabric.Circle({
+            fabricObject = new fabric.Circle({
                 id: objData.id,
                 left: objData.data.left,
                 top: objData.data.top,
@@ -137,21 +251,29 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                 fill: objData.data.fill,
                 stroke: objData.data.stroke,
                 strokeWidth: objData.data.strokeWidth,
+                scaleX: objData.data.scaleX || 1,
+                scaleY: objData.data.scaleY || 1,
+                angle: objData.data.angle || 0,
             });
-            canvas.add(circle);
-        } else if (objData.type === 'text') {
-            const text = new fabric.Text(objData.data.text, {
+        } else if (objData.type === 'text' || objData.type === 'textbox') {
+            fabricObject = new fabric.Textbox(objData.data.text, {
                 id: objData.id,
                 left: objData.data.left,
                 top: objData.data.top,
                 fontSize: objData.data.fontSize,
                 fill: objData.data.fill,
                 fontFamily: objData.data.fontFamily || 'Arial',
+                scaleX: objData.data.scaleX || 1,
+                scaleY: objData.data.scaleY || 1,
+                angle: objData.data.angle || 0,
+                editable: true,
             });
-            canvas.add(text);
         }
 
-        canvas.renderAll();
+        if (fabricObject) {
+            canvas.add(fabricObject);
+            canvas.renderAll();
+        }
     };
 
     // Update object on canvas
@@ -183,7 +305,6 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     };
 
     // Tool handlers
-    // Tool handlers
     const handleToolChange = (tool) => {
         const canvas = fabricRef.current;
         if (!canvas) return;
@@ -206,7 +327,10 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
             case 'rect':
             case 'circle':
             case 'text':
-                addShape(tool); // ✅ use the existing addShape function
+                canvas.isDrawingMode = false;
+                canvas.selection = true;
+                setIsDrawing(false);
+                addShape(tool);
                 break;
 
             default:
@@ -256,35 +380,51 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                     fontFamily: 'Arial',
                     editable: true,
                 });
-
-                // ✅ Allow immediate typing
-                canvas.add(shape);
-                canvas.setActiveObject(shape);
-                canvas.renderAll();
-                shape.enterEditing();
-                shape.hiddenTextarea?.focus();
                 break;
 
             default:
                 return;
         }
 
-        canvas.add(shape);
-        canvas.setActiveObject(shape);
-        canvas.renderAll();
+        if (shape) {
+            canvas.add(shape);
+            canvas.setActiveObject(shape);
+            canvas.renderAll();
 
-        // Send to other users
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            // For text, enter editing mode immediately
+            if (shapeType === 'text' && shape.enterEditing) {
+                shape.enterEditing();
+                shape.hiddenTextarea?.focus();
+            }
+
+            // Send to other users
             const shapeData = {
                 id: shapeId,
                 type: shapeType,
                 data: shape.toObject()
             };
 
-            wsRef.current.send(JSON.stringify({
+            sendWebSocketMessage({
                 type: 'add_object',
                 object: shapeData
-            }));
+            });
+        }
+    };
+
+    // Delete selected object
+    const deleteSelectedObject = () => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        const activeObject = canvas.getActiveObject();
+        if (activeObject && activeObject.id) {
+            canvas.remove(activeObject);
+            canvas.renderAll();
+
+            sendWebSocketMessage({
+                type: 'delete_object',
+                object_id: activeObject.id
+            });
         }
     };
 
@@ -297,11 +437,9 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         canvas.backgroundColor = 'white';
         canvas.renderAll();
 
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({
-                type: 'clear_canvas'
-            }));
-        }
+        sendWebSocketMessage({
+            type: 'clear_canvas'
+        });
     };
 
     // Export session
@@ -343,6 +481,7 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
             canvas.freeDrawingBrush.width = size;
         }
     };
+
     // Update brush color
     useEffect(() => {
         const canvas = fabricRef.current;
@@ -359,33 +498,70 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         }
     }, [brushSize]);
 
-    // Initialize canvas and WebSocket
+    // Keyboard shortcuts
     useEffect(() => {
-        const cleanup = initCanvas();
-
-        // Connect to WebSocket
-        wsRef.current = connectWebSocket(sessionId, handleWebSocketMessage);
-
-        wsRef.current.onopen = () => {
-            setIsConnected(true);
-        };
-
-        wsRef.current.onclose = () => {
-            setIsConnected(false);
-        };
-
-        wsRef.current.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            setIsConnected(false);
-        };
-
-        return () => {
-            if (cleanup) cleanup();
-            if (wsRef.current) {
-                wsRef.current.close();
+        const handleKeyDown = (e) => {
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+                deleteSelectedObject();
             }
         };
-    }, [sessionId, initCanvas, handleWebSocketMessage]);
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, []);
+
+    // Main initialization effect - runs only once
+    useEffect(() => {
+        // Prevent multiple initializations (React StrictMode protection)
+        if (isInitializedRef.current || !sessionId) {
+            console.log('[Whiteboard] Skipping initialization - already initialized or no sessionId');
+            return;
+        }
+
+        console.log('[Whiteboard] Starting initialization for session:', sessionId);
+        isInitializedRef.current = true;
+
+        // Initialize canvas
+        const canvasCleanup = initCanvas();
+
+        // Connect to WebSocket using the new manager
+        console.log('[Whiteboard] Connecting to WebSocket...');
+        wsManagerRef.current = connectWebSocket(sessionId, handleWebSocketMessage);
+
+        // Store cleanup function
+        cleanupRef.current = () => {
+            console.log('[Whiteboard] Running cleanup...');
+            setIsConnected(false);
+
+            if (wsManagerRef.current) {
+                wsManagerRef.current.disconnect();
+                wsManagerRef.current = null;
+            }
+
+            if (canvasCleanup) {
+                canvasCleanup();
+            }
+
+            isInitializedRef.current = false;
+        };
+
+        // Cleanup on unmount or sessionId change
+        return cleanupRef.current;
+    }, [sessionId]); // Only depend on sessionId
+
+    // Separate effect for connection monitoring (to avoid recreating WebSocket)
+    useEffect(() => {
+        const checkConnection = () => {
+            if (wsManagerRef.current && wsManagerRef.current.isConnected()) {
+                setIsConnected(true);
+            } else {
+                setIsConnected(false);
+            }
+        };
+
+        const connectionInterval = setInterval(checkConnection, 2000);
+        return () => clearInterval(connectionInterval);
+    }, []);
 
     return (
         <div className="flex h-screen bg-gray-100">
@@ -425,6 +601,11 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                         <span className="text-sm text-gray-600">
                             {activeUsers.length} user{activeUsers.length !== 1 ? 's' : ''} online
                         </span>
+                        {userId && (
+                            <span className="text-xs text-gray-500">
+                                (You: {userId.slice(-4)})
+                            </span>
+                        )}
                     </div>
                 </div>
 
