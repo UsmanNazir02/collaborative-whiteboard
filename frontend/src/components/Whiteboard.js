@@ -1,4 +1,3 @@
-// src/components/Whiteboard.js - Fixed Version
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as fabric from "fabric";
 import Toolbar from './Toolbar';
@@ -8,8 +7,9 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     const canvasRef = useRef(null);
     const fabricRef = useRef(null);
     const wsManagerRef = useRef(null);
-    const isInitializedRef = useRef(false); // Prevent multiple initializations
-    const cleanupRef = useRef(null);
+    const isInitializedRef = useRef(false);
+    const stageRef = useRef();
+    const canvasContainerRef = useRef(null);
 
     const [isConnected, setIsConnected] = useState(false);
     const [activeUsers, setActiveUsers] = useState([]);
@@ -18,6 +18,13 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     const [currentColor, setCurrentColor] = useState('#000000');
     const [brushSize, setBrushSize] = useState(5);
     const [isDrawing, setIsDrawing] = useState(false);
+    const [isToolbarCollapsed, setIsToolbarCollapsed] = useState(false);
+    const [objects, setObjects] = useState([]);
+    const [selectedId, setSelectedId] = useState(null);
+
+    // Fixed canvas dimensions for consistent drawing across all devices
+    const CANVAS_WIDTH = 1920; // Fixed width
+    const CANVAS_HEIGHT = 1080; // Fixed height
 
     // Send WebSocket message helper
     const sendWebSocketMessage = useCallback((message) => {
@@ -99,6 +106,43 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         }
     }, [userId]);
 
+    // Calculate canvas display dimensions
+    const calculateCanvasDisplaySize = useCallback(() => {
+        if (!canvasContainerRef.current) return { width: CANVAS_WIDTH, height: CANVAS_HEIGHT };
+
+        const container = canvasContainerRef.current;
+        const containerRect = container.getBoundingClientRect();
+        const containerWidth = containerRect.width - 20; // Padding
+        const containerHeight = containerRect.height - 20; // Padding
+
+        // Calculate scale to fit the fixed canvas size within the container
+        const scaleX = containerWidth / CANVAS_WIDTH;
+        const scaleY = containerHeight / CANVAS_HEIGHT;
+        const scale = Math.min(scaleX, scaleY, 1); // Don't scale up, only down
+
+        return {
+            width: CANVAS_WIDTH * scale,
+            height: CANVAS_HEIGHT * scale,
+            scale: scale
+        };
+    }, []);
+
+    // Update canvas display size
+    const updateCanvasDisplaySize = useCallback(() => {
+        const canvas = fabricRef.current;
+        if (!canvas) return;
+
+        const { width, height, scale } = calculateCanvasDisplaySize();
+
+        // Update canvas display size
+        canvas.setDimensions({ width, height });
+
+        // Set zoom level to maintain fixed coordinate system
+        canvas.setZoom(scale);
+
+        canvas.renderAll();
+    }, [calculateCanvasDisplaySize]);
+
     // Initialize Fabric.js canvas (only once)
     const initCanvas = useCallback(() => {
         if (fabricRef.current || !canvasRef.current) {
@@ -107,12 +151,20 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         }
 
         console.log('[Whiteboard] Initializing Fabric.js canvas');
+
+        // Calculate initial display size
+        const { width, height, scale } = calculateCanvasDisplaySize();
+
         const canvas = new fabric.Canvas(canvasRef.current, {
-            width: window.innerWidth - 300,
-            height: window.innerHeight - 100,
+            width: width,
+            height: height,
             backgroundColor: 'white',
             isDrawingMode: true,
         });
+
+        // Set up fixed coordinate system
+        canvas.setZoom(scale);
+        canvas.absolutePan = true;
 
         canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
         canvas.freeDrawingBrush.color = currentColor;
@@ -191,12 +243,9 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
             });
         });
 
+        // Handle window resize
         const handleResize = () => {
-            canvas.setDimensions({
-                width: window.innerWidth - 300,
-                height: window.innerHeight - 100
-            });
-            canvas.renderAll();
+            updateCanvasDisplaySize();
         };
 
         window.addEventListener('resize', handleResize);
@@ -204,10 +253,12 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         return () => {
             console.log('[Whiteboard] Cleaning up canvas');
             window.removeEventListener('resize', handleResize);
-            canvas.dispose();
+            if (canvas && typeof canvas.dispose === 'function') {
+                canvas.dispose();
+            }
             fabricRef.current = null;
         };
-    }, [currentColor, brushSize, sendWebSocketMessage]);
+    }, [currentColor, brushSize, sendWebSocketMessage, calculateCanvasDisplaySize, updateCanvasDisplaySize]);
 
     // Add object to canvas
     const addObjectToCanvas = (objData) => {
@@ -346,12 +397,16 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         let shape;
         const shapeId = `${shapeType}_${Date.now()}_${Math.random()}`;
 
+        // Get canvas center in fixed coordinate system
+        const centerX = CANVAS_WIDTH / 2;
+        const centerY = CANVAS_HEIGHT / 2;
+
         switch (shapeType) {
             case 'rect':
                 shape = new fabric.Rect({
                     id: shapeId,
-                    left: 100,
-                    top: 100,
+                    left: centerX - 100,
+                    top: centerY - 50,
                     width: 200,
                     height: 100,
                     fill: 'transparent',
@@ -362,8 +417,8 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
             case 'circle':
                 shape = new fabric.Circle({
                     id: shapeId,
-                    left: 100,
-                    top: 100,
+                    left: centerX - 50,
+                    top: centerY - 50,
                     radius: 50,
                     fill: 'transparent',
                     stroke: currentColor,
@@ -373,8 +428,8 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
             case 'text':
                 shape = new fabric.Textbox('Type here...', {
                     id: shapeId,
-                    left: 100,
-                    top: 100,
+                    left: centerX - 50,
+                    top: centerY - 10,
                     fontSize: 20,
                     fill: currentColor,
                     fontFamily: 'Arial',
@@ -443,25 +498,25 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     };
 
     // Export session
-    const exportSession = async () => {
+    // Export session as PNG (from Fabric.js canvas)
+    const exportSession = () => {
         try {
-            const response = await fetch(`http://localhost:8000/api/sessions/${sessionId}/export`, {
-                method: 'POST',
+            const canvas = fabricRef.current;
+            if (!canvas) return;
+
+            // Export to PNG (higher resolution possible by multiplying multiplier)
+            const dataURL = canvas.toDataURL({
+                format: 'png',
+                multiplier: 2 // for higher resolution
             });
 
-            if (response.ok) {
-                const data = await response.json();
-                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `whiteboard_session_${sessionId}_${new Date().toISOString().split('T')[0]}.json`;
-                a.click();
-                URL.revokeObjectURL(url);
-            }
+            const link = document.createElement("a");
+            link.download = `whiteboard_session_${sessionId}_${new Date().toISOString().split("T")[0]}.png`;
+            link.href = dataURL;
+            link.click();
         } catch (error) {
-            console.error('Export failed:', error);
-            alert('Export failed. Please try again.');
+            console.error("Export failed:", error);
+            alert("Export failed. Please try again.");
         }
     };
 
@@ -482,6 +537,15 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         }
     };
 
+    // Update canvas size when toolbar collapses/expands
+    useEffect(() => {
+        if (fabricRef.current) {
+            setTimeout(() => {
+                updateCanvasDisplaySize();
+            }, 300); // Wait for transition to complete
+        }
+    }, [isToolbarCollapsed, updateCanvasDisplaySize]);
+
     // Update brush color
     useEffect(() => {
         const canvas = fabricRef.current;
@@ -501,18 +565,50 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
     // Keyboard shortcuts
     useEffect(() => {
         const handleKeyDown = (e) => {
-            if (e.key === 'Delete' || e.key === 'Backspace') {
-                deleteSelectedObject();
+            if (e.key === 'Escape') {
+                setIsToolbarCollapsed(!isToolbarCollapsed);
+                return;
+            }
+
+            if (selectedId) {
+                const obj = objects.find(o => o.id === selectedId);
+
+                if (!obj) return;
+
+                if (obj.type === 'textbox') {
+                    if (e.key === 'Backspace') {
+                        // remove last character
+                        setObjects(prev =>
+                            prev.map(o =>
+                                o.id === selectedId
+                                    ? { ...o, text: o.text.slice(0, -1) }
+                                    : o
+                            )
+                        );
+                    } else if (e.key.length === 1) {
+                        // append typed character
+                        setObjects(prev =>
+                            prev.map(o =>
+                                o.id === selectedId
+                                    ? { ...o, text: o.text + e.key }
+                                    : o
+                            )
+                        );
+                    }
+                } else if (e.key === 'Delete' || e.key === 'Backspace') {
+                    // normal delete for non-text objects
+                    deleteSelectedObject();
+                }
             }
         };
 
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, []);
+    }, [selectedId, objects, isToolbarCollapsed]);
+
 
     // Main initialization effect - runs only once
     useEffect(() => {
-        // Prevent multiple initializations (React StrictMode protection)
         if (isInitializedRef.current || !sessionId) {
             console.log('[Whiteboard] Skipping initialization - already initialized or no sessionId');
             return;
@@ -521,15 +617,14 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         console.log('[Whiteboard] Starting initialization for session:', sessionId);
         isInitializedRef.current = true;
 
-        // Initialize canvas
-        const canvasCleanup = initCanvas();
+        let canvasCleanup;
 
-        // Connect to WebSocket using the new manager
-        console.log('[Whiteboard] Connecting to WebSocket...');
-        wsManagerRef.current = connectWebSocket(sessionId, handleWebSocketMessage);
+        setTimeout(() => {
+            canvasCleanup = initCanvas();
+            wsManagerRef.current = connectWebSocket(sessionId, handleWebSocketMessage);
+        }, 100);
 
-        // Store cleanup function
-        cleanupRef.current = () => {
+        return () => {
             console.log('[Whiteboard] Running cleanup...');
             setIsConnected(false);
 
@@ -544,15 +639,13 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
 
             isInitializedRef.current = false;
         };
-
-        // Cleanup on unmount or sessionId change
-        return cleanupRef.current;
-    }, [sessionId]); // Only depend on sessionId
+    }, [sessionId]);
 
     // Separate effect for connection monitoring (to avoid recreating WebSocket)
     useEffect(() => {
         const checkConnection = () => {
-            if (wsManagerRef.current && wsManagerRef.current.isConnected()) {
+            const manager = wsManagerRef.current;
+            if (manager && manager.ws && manager.ws.readyState === WebSocket.OPEN) {
                 setIsConnected(true);
             } else {
                 setIsConnected(false);
@@ -562,6 +655,7 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
         const connectionInterval = setInterval(checkConnection, 2000);
         return () => clearInterval(connectionInterval);
     }, []);
+
 
     return (
         <div className="flex h-screen bg-gray-100">
@@ -573,6 +667,7 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                 currentTool={currentTool}
                 currentColor={currentColor}
                 brushSize={brushSize}
+                isCollapsed={isToolbarCollapsed}
                 onToolChange={handleToolChange}
                 onColorChange={handleColorChange}
                 onBrushSizeChange={handleBrushSizeChange}
@@ -580,6 +675,7 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                 onClearCanvas={clearCanvas}
                 onExportSession={exportSession}
                 onLeaveSession={onLeaveSession}
+                onToggleCollapse={() => setIsToolbarCollapsed(!isToolbarCollapsed)}
             />
 
             {/* Canvas Container */}
@@ -596,6 +692,9 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                                 {isConnected ? 'Connected' : 'Disconnected'}
                             </span>
                         </div>
+                        <div className="text-xs text-gray-500">
+                            Canvas: {CANVAS_WIDTH} × {CANVAS_HEIGHT}
+                        </div>
                     </div>
                     <div className="flex items-center space-x-2">
                         <span className="text-sm text-gray-600">
@@ -606,12 +705,22 @@ const Whiteboard = ({ sessionId, userId: initialUserId, onLeaveSession }) => {
                                 (You: {userId.slice(-4)})
                             </span>
                         )}
+                        <span className="text-xs text-gray-400">
+                            Press ESC to toggle toolbar
+                        </span>
                     </div>
                 </div>
 
                 {/* Canvas */}
-                <div className="flex-1 overflow-hidden bg-white">
-                    <canvas ref={canvasRef} className="border border-gray-200" />
+                <div
+                    ref={canvasContainerRef}
+                    className="flex-1 overflow-hidden bg-white flex items-center justify-center p-2"
+                >
+                    <canvas
+                        ref={canvasRef}
+                        className="border border-gray-200 shadow-lg rounded-lg"
+                        style={{ maxWidth: '100%', maxHeight: '100%' }}
+                    />
                 </div>
             </div>
         </div>
